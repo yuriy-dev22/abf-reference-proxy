@@ -1,0 +1,13 @@
+{
+  "name": "abf-reference-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Node TLS relay that fetches ABF CCF reference URLs using the legacy AES128-SHA cipher Supabase Edge (Deno) cannot negotiate.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node abf-reference-fetch-proxy.mjs"
+  }
+}
