@@ -4,15 +4,26 @@ import { TextEncoder } from 'node:util';
 
 const PORT = Number(process.env.PORT || 8787);
 const PROXY_SECRET = process.env.ABF_REFERENCE_PROXY_SECRET || '';
-const ALLOWED_ORIGIN = 'https://www.ccf.customs.gov.au';
-const ALLOWED_PATH_PREFIX = '/reference/';
-
 const legacyTlsAgent = new https.Agent({
+  // CCF's older server only negotiates this legacy cipher over TLS 1.2.
   ciphers: 'AES128-SHA',
   minVersion: 'TLSv1.2',
   maxVersion: 'TLSv1.2',
   honorCipherOrder: true,
 });
+// abf.gov.au sits behind a modern WAF that rejects the legacy AES128-SHA cipher (TLS alert 40 handshake
+// failure). Use Node's default modern suite (ECDHE/GCM) and allow up to TLS 1.3.
+const modernTlsAgent = new https.Agent({ minVersion: 'TLSv1.2' });
+
+// Allowed upstream sources: origin + path prefix + which TLS agent to use for that host.
+const ALLOWED_SOURCES = [
+  { origin: 'https://www.ccf.customs.gov.au', pathPrefix: '/reference/', agent: legacyTlsAgent },
+  {
+    origin: 'https://www.abf.gov.au',
+    pathPrefix: '/importing-exporting-and-manufacturing/tariff-classification/',
+    agent: modernTlsAgent,
+  },
+];
 
 function json(res, status, body) {
   res.writeHead(status, {
@@ -46,23 +57,28 @@ function readJson(req) {
 
 function validateAbfUrl(value) {
   const url = new URL(value);
-  if (url.origin !== ALLOWED_ORIGIN || !url.pathname.startsWith(ALLOWED_PATH_PREFIX)) {
-    throw new Error('Only ABF CCF reference URLs are allowed');
+  const source = ALLOWED_SOURCES.find(
+    (s) => url.origin === s.origin && url.pathname.startsWith(s.pathPrefix),
+  );
+  if (!source) {
+    throw new Error('Only ABF CCF reference and ABF tariff-schedule URLs are allowed');
   }
-  return url;
+  return { url, agent: source.agent };
 }
 
-function fetchAbfText(url) {
+function fetchAbfText(url, agent) {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
     console.log(`[abf-reference-fetch-proxy] fetching ${url}`);
 
     const req = https.get(url, {
-      agent: legacyTlsAgent,
+      agent,
       timeout: 120_000,
       headers: {
-        'User-Agent': 'Starship-ABF-Reference-Fetch-Proxy/1.0',
-        'Accept': 'text/plain,text/html,*/*',
+        // Browser-like UA: abf.gov.au's WAF can also reject the non-browser UA after the TLS handshake.
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/plain,text/html,application/xhtml+xml,*/*',
       },
     }, (res) => {
       if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
@@ -122,9 +138,9 @@ createServer(async (req, res) => {
     }
 
     const body = await readJson(req);
-    const url = validateAbfUrl(body.url);
+    const { url, agent } = validateAbfUrl(body.url);
     console.log(`[abf-reference-fetch-proxy] accepted request url=${url}`);
-    const result = await fetchAbfText(url);
+    const result = await fetchAbfText(url, agent);
 
     json(res, 200, {
       url: url.toString(),
